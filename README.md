@@ -13,9 +13,6 @@ official [MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk) (v
 Supported formats: plain text (`.txt`, `.md`, `.csv`, `.log`) and Word (`.docx`, including tables).
 Text files are read as UTF-8 and fall back to Windows-1252, so older Swedish files keep their å, ä and ö.
 
-A Swedish walkthrough of how the MCP server and client fit together, with real protocol messages from this
-server, is in [docs/hur-mcp-fungerar.md](docs/hur-mcp-fungerar.md).
-
 ## Security model
 
 The agent can only read, and only inside the configured folder.
@@ -110,7 +107,6 @@ src/ari_mcp/
 tests/          pytest suite; test_server.py drives the server through a real MCP client
 examples/       demo_client.py (a minimal MCP client) and a Claude Desktop config
 sample-docs/    Small public documents for trying it out
-docs/           How MCP servers and clients work, explained with this project (Swedish)
 ```
 
 ## Design notes
