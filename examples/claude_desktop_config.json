@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "ari-documents": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--directory",
+        "C:\\Users\\Obilic\\source\\repos\\Ari",
+        "ari-mcp",
+        "--root",
+        "C:\\Store\\Dokument"
+      ]
+    }
+  }
+}
