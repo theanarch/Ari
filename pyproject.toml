@@ -1,16 +1,18 @@
 [project]
 name = "ari-mcp"
 version = "0.1.0"
-description = "MCP server giving an AI agent read-only access to a folder of public documents"
+description = "MCP servers giving an AI agent read-only access to public documents and a guarded SQL Server memory"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "mcp>=2.3,<3",
+    "mssql-python>=1.0",
     "python-docx>=1.1",
 ]
 
 [project.scripts]
 ari-mcp = "ari_mcp.server:main"
+ari-memory = "ari_mcp.memory_server:main"
 
 [dependency-groups]
 dev = [
