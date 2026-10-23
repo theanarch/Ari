@@ -1,0 +1,17 @@
+{
+  "inputs": [
+    {
+      "type": "promptString",
+      "id": "docs-root",
+      "description": "Folder with documents for ari-documents (absolute, or relative to the repository)",
+      "default": "sample-docs"
+    }
+  ],
+  "servers": {
+    "ari-documents": {
+      "type": "stdio",
+      "command": "uv",
+      "args": ["run", "--directory", "${workspaceFolder}", "ari-mcp", "--root", "${input:docs-root}"]
+    }
+  }
+}
