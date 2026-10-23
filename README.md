@@ -7,7 +7,7 @@ agent a narrow, well-guarded capability:
 | Server | Command | What the agent can do |
 | --- | --- | --- |
 | **ari-documents** | `ari-mcp` | Read and search one folder of public documents. Nothing else. |
-| **ari-memory** | `ari-memory` | Save, find, update and delete notes in one SQL Server table, one row at a time. |
+| **ari-memory** | `ari-memory` | Create tables in SQL Server and read and write their rows, one row at a time. |
 
 Both follow the same idea: the agent gets a few specific tools instead of general access, and every limit is
 enforced in code (and, for the database, in SQL Server itself) rather than left to the model.
@@ -44,45 +44,58 @@ One thing the server cannot do for you: document *content* is untrusted input to
 could contain text that looks like instructions. Hosts should treat tool results as data, which is one more
 reason the server stays read-only.
 
-## ari-memory: a guarded SQL Server memory
+## ari-memory: AI-managed tables in SQL Server, with guardrails
 
-A small long-term memory for the agent, stored in the `dbo.Memories` table of the `ArisMemory` database.
+The agent can design its own tables in the `ArisMemory` database and keep data in them, for example a task
+list, a reading log or notes about the user. Everything it creates lives in the `ai` schema.
 
 | Tool | What it does | Hint to the host |
 | --- | --- | --- |
-| `search_memories` | Finds memories by text and/or topic, newest first, at most 50. | read-only |
-| `add_memory` | Saves one new memory (topic + content). | additive |
-| `update_memory` | Replaces the content (and optionally topic) of one memory, by id. | destructive |
-| `delete_memory` | Deletes one memory, by id. | destructive |
+| `list_tables` | Lists the tables and their columns. | read-only |
+| `create_table` | Creates a table from a list of columns (`text`, `long_text`, `integer`, `decimal`, `boolean`, `date`, `datetime`). | additive |
+| `query_rows` | Reads rows by exact-match filters and/or text search, newest first, at most 100. | read-only |
+| `insert_row` | Adds one row. | additive |
+| `update_row` | Changes one row, by `Id`. | destructive |
+| `delete_row` | Deletes one row, by `Id`. | destructive |
+
+Every table gets the same frame automatically: an `Id` primary key, the requested columns, and `CreatedAt`,
+`UpdatedAt` and `DeletedAt`.
 
 ### Guardrails
 
-The goal: the agent can never drop the database or a table, never touch more rows than the one it was asked
-about, and nothing it does is unrecoverable. That is enforced in four layers, each of which would hold on its own:
+The goal: the agent can build and fill tables, but can never drop or empty a table, never touch more rows
+than the one it was asked about, and nothing it does is unrecoverable. That is enforced in four layers:
 
-1. **No free-form SQL.** The agent can only call the four tools above. Every statement is fixed and
-   parameterized in [`memory_store.py`](src/ari_mcp/memory_store.py), so there is no tool that could drop,
-   truncate or alter anything, and text like `'); DROP TABLE …` is stored as text.
-2. **One row per change.** Updates and deletes take a single `memory_id` and match it against the primary key.
-   Each write runs in a transaction, and the `OUTPUT` clause reports exactly which rows changed. The
-   transaction commits only if that is exactly one row; otherwise it rolls back.
-3. **Deletes are soft and capped.** `delete_memory` only sets `DeletedAt`; the row stays and can be restored
-   with `UPDATE dbo.Memories SET DeletedAt = NULL WHERE Id = …`. Each server session allows at most
-   5 deletions (`--max-deletes` / `ARI_MEMORY_MAX_DELETES`), so a confused agent cannot work through the
-   table one row at a time.
-4. **Least privilege in SQL Server.** [`sql/02_create_ai_login.sql`](sql/02_create_ai_login.sql) creates an
-   `ari_mcp` login that may `SELECT` and `INSERT` on `dbo.Memories`, `UPDATE` only its text and timestamp
-   columns, and is explicitly denied `DELETE`. It has no rights on anything else. The tests connect as this
-   login with raw SQL and confirm that `DELETE`, `TRUNCATE`, `DROP TABLE`, `ALTER TABLE`, `CREATE TABLE` and
-   `DROP DATABASE` are all refused by the server itself.
+1. **No free-form SQL.** The agent names a table, columns and values; it never sends SQL. Every table and column
+   name is checked against the database's own catalog (`sys.tables`, `sys.columns`) before it is quoted into a
+   statement, and every value is a parameter. Text like `'); DROP TABLE …` is stored as text, and an unknown
+   column name is refused with a list of the real ones.
+2. **One row per change.** Inserts, updates and deletes affect a single row, chosen by primary key. Each write
+   runs in a transaction, and the `OUTPUT` clause reports exactly which rows changed; the transaction commits
+   only if that is exactly one row. Reads are capped at 100 rows.
+3. **Deletes are soft and capped.** `delete_row` only sets `DeletedAt`; the row stays and can be restored with
+   `UPDATE ai.<Table> SET DeletedAt = NULL WHERE Id = …`. Each server session allows at most 5 deletions
+   (`--max-deletes` / `ARI_MEMORY_MAX_DELETES`), so a confused agent cannot work through a table row by row.
+   There is no tool to drop, rename or alter a table.
+4. **Least privilege in SQL Server.** The agent's `ari_mcp` login may only `SELECT`, `INSERT` and `UPDATE` in
+   the `ai` schema, is explicitly denied `DELETE`, and has no `CREATE TABLE` or `ALTER` rights at all. Tables are
+   created through one stored procedure, [`ai.CreateTable`](sql/01_create_database.sql), which runs with the
+   owner's rights (`EXECUTE AS OWNER`), validates names and types itself, and only ever builds a
+   `CREATE TABLE ai.[…]` statement from a fixed set of types. The tests connect as `ari_mcp` with raw SQL and
+   confirm that `DELETE`, `TRUNCATE`, `DROP TABLE`, `ALTER TABLE`, `CREATE TABLE`, `DROP PROCEDURE`,
+   `ALTER SCHEMA … TRANSFER` and `DROP DATABASE` are all refused by SQL Server, and that SQL injected through
+   the procedure's arguments is rejected.
 
-Inputs are validated before any SQL runs: topic ≤ 100 characters, content ≤ 4000, ids ≥ 1, search limit ≤ 50.
+Layers 1–3 are what stop mass *updates*; layer 4 is what makes deleting or dropping impossible even if the
+Python code were wrong.
 
 ### Database setup
 
-Run the two scripts once, as an administrator (SSMS, or `sqlcmd -S localhost -E -i <file>`):
+Run the two scripts as an administrator (SSMS, or `sqlcmd -S localhost -E -i <file>`). Both are safe to run
+again, for example after pulling a newer version:
 
-1. [`sql/01_create_database.sql`](sql/01_create_database.sql) creates `ArisMemory` and `dbo.Memories`.
+1. [`sql/01_create_database.sql`](sql/01_create_database.sql) creates `ArisMemory`, the `ai` schema and the
+   `ai.CreateTable` procedure.
 2. [`sql/02_create_ai_login.sql`](sql/02_create_ai_login.sql) creates the restricted `ari_mcp` login.
    Change the password first. SQL logins need *SQL Server and Windows Authentication mode* (Server
    Properties → Security in SSMS, then restart the SQL Server service).
@@ -95,9 +108,9 @@ or `--connection-string`:
 Server=localhost;Database=ArisMemory;UID=ari_mcp;PWD=<password>;Encrypt=yes;TrustServerCertificate=yes
 ```
 
-Use `Server=localhost\SQLEXPRESS` for SQL Server Express. Windows authentication
-(`Trusted_Connection=yes` instead of `UID`/`PWD`) also works, but then the server runs with *your* database
-rights and layer 4 no longer applies.
+Use `Server=localhost\SQLEXPRESS` for SQL Server Express. If the server cannot connect at startup it still
+starts, logs a warning to stderr, and reports the connection error to the agent on each tool call, so the
+reason shows up in the chat.
 
 ## Requirements
 
@@ -160,7 +173,7 @@ Open **Settings → Developer → Edit Config** (on Windows the file is
 ```
 
 Restart Claude Desktop, and try *"What does the travel policy in the archive say about trains?"* or
-*"Remember that I prefer answers in Swedish."*
+*"Create a table for my reading list and add the book I'm reading now."*
 
 ### VS Code
 
@@ -185,9 +198,9 @@ src/ari_mcp/
   server.py         ari-documents: the three tools, their schemas, and the CLI entry point
   sandbox.py        DocumentRoot: the path check every document tool goes through
   readers.py        Text extraction for .txt/.md and .docx
-  memory_server.py  ari-memory: the four tools and the CLI entry point
-  memory_store.py   All SQL for ari-memory, with the one-row, soft-delete and delete-limit guardrails
-sql/                Database and least-privilege login setup for ari-memory
+  memory_server.py  ari-memory: the six tools and the CLI entry point
+  memory_store.py   All SQL for ari-memory, with the name checks, one-row, soft-delete and delete-limit guardrails
+sql/                Database, ai.CreateTable procedure and least-privilege login for ari-memory
 tests/              pytest suites; both servers are tested through a real MCP client
 examples/           demo_client.py (a minimal MCP client) and a Claude Desktop config
 sample-docs/        Small public documents for trying it out
