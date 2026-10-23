@@ -13,8 +13,12 @@
 USE master;
 GO
 
+-- Running the script again resets the password, so the login always matches what this file says.
 IF SUSER_ID(N'ari_mcp') IS NULL
     CREATE LOGIN ari_mcp WITH PASSWORD = N'CHANGE_ME_Str0ng!Pass', DEFAULT_DATABASE = ArisMemory, CHECK_POLICY = ON;
+ELSE
+    ALTER LOGIN ari_mcp WITH PASSWORD = N'CHANGE_ME_Str0ng!Pass', DEFAULT_DATABASE = ArisMemory, CHECK_POLICY = ON;
+ALTER LOGIN ari_mcp ENABLE;
 GO
 
 USE ArisMemory;
