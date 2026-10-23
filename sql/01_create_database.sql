@@ -1,6 +1,7 @@
--- Creates the ArisMemory database, the "ai" schema the AI works in, and the one procedure it may use
--- to create tables. Safe to run again: everything is created only if missing, and the procedure is updated.
--- Run as an administrator, in SSMS or with: sqlcmd -S localhost -E -i sql\01_create_database.sql
+-- Step 1 of 2: creates the ArisMemory database, the "ai" schema the AI works in, and the one procedure it may
+-- use to create tables. Then run 02_create_ai_login.sql.
+-- Run as an administrator, in SSMS or with: sqlcmd -S localhost -E -C -i sql\01_create_database.sql
+-- Safe to run again: everything is created only if missing, and the procedure is updated.
 
 IF DB_ID(N'ArisMemory') IS NULL
     CREATE DATABASE ArisMemory;

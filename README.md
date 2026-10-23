@@ -89,69 +89,72 @@ than the one it was asked about, and nothing it does is unrecoverable. That is e
 Layers 1–3 are what stop mass *updates*; layer 4 is what makes deleting or dropping impossible even if the
 Python code were wrong.
 
-### Database setup
-
-Run the two scripts as an administrator (SSMS, or `sqlcmd -S localhost -E -i <file>`). Both are safe to run
-again, for example after pulling a newer version:
-
-1. [`sql/01_create_database.sql`](sql/01_create_database.sql) creates `ArisMemory`, the `ai` schema and the
-   `ai.CreateTable` procedure.
-2. [`sql/02_create_ai_login.sql`](sql/02_create_ai_login.sql) creates the restricted `ari_mcp` login.
-   Change the password first. SQL logins need *SQL Server and Windows Authentication mode* (Server
-   Properties → Security in SSMS, then restart the SQL Server service).
-
 The server connects with [mssql-python](https://github.com/microsoft/mssql-python), Microsoft's official
-driver, which needs no separate ODBC driver. Give it a connection string via `ARI_MEMORY_CONNECTION_STRING`
-or `--connection-string`:
+driver, which needs no separate ODBC driver. Setup is covered in [Getting started](#getting-started).
 
-```
-Server=localhost;Database=ArisMemory;UID=ari_mcp;PWD=<password>;Encrypt=yes;TrustServerCertificate=yes
-```
+## Getting started
 
-Use `Server=localhost\SQLEXPRESS` for SQL Server Express. If the server cannot connect at startup it still
-starts, logs a warning to stderr, and reports the connection error to the agent on each tool call, so the
-reason shows up in the chat.
+These steps are for Windows, which is where Claude Desktop and SQL Server usually run together. Each server
+works on its own, so skip step 4 if you only want the document server.
 
-## Requirements
+### 1. Install the prerequisites
 
-- Python 3.11 or newer
-- [uv](https://docs.astral.sh/uv/) (recommended), or plain `pip`
-- For ari-memory: SQL Server 2016 or newer (Express and Developer editions work)
+- **Python 3.11 or newer** and **[uv](https://docs.astral.sh/uv/)**. Install uv in PowerShell, then open a new
+  terminal:
+  ```powershell
+  powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+  ```
+- **[Claude Desktop](https://claude.ai/download)**, or another MCP host (see [Other hosts](#other-hosts-and-tools)).
+- For ari-memory only: **SQL Server 2016 or newer** (the free Express or Developer edition is fine) and
+  **SSMS** or `sqlcmd` to run the setup scripts.
 
-## Quick start
+### 2. Clone and install
 
-```bash
+```powershell
 git clone https://github.com/theanarch/Ari.git
 cd Ari
-uv sync                       # creates .venv and installs mcp, python-docx, mssql-python and the dev tools
-uv run pytest                 # document server tests; the SQL Server tests are skipped without a database
-uv run python examples/demo_client.py sample-docs --query budget
+uv sync          # creates .venv and installs mcp, python-docx, mssql-python and the test tools
+uv run pytest    # the document server tests; the SQL Server tests are skipped until step 4
 ```
 
-Run a server yourself (it then waits for a client on stdin/stdout):
+### 3. Try the document server
 
-```bash
-uv run ari-mcp --root "C:\Store\Dokument"
-uv run ari-memory --connection-string "Server=localhost;Database=ArisMemory;UID=ari_mcp;PWD=…;Encrypt=yes;TrustServerCertificate=yes"
+Put a few `.txt`, `.md` or `.docx` files in a folder (or use `sample-docs`), then run the demo client, which
+starts the server and calls each tool the way an AI host would:
+
+```powershell
+uv run python examples/demo_client.py "C:\Store\Dokument" --query budget
 ```
 
-To run the SQL Server tests, point them at a server where they may create `ArisMemory` (for example a
-throwaway container):
+### 4. Set up the memory database
 
-```bash
-docker run -d -p 1433:1433 -e ACCEPT_EULA=Y -e MSSQL_SA_PASSWORD='Str0ng!Passw0rd' mcr.microsoft.com/mssql/server:2022-latest
-ARI_MEMORY_TEST_SERVER=localhost,1433 ARI_MEMORY_TEST_SA_PASSWORD='Str0ng!Passw0rd' uv run pytest
-```
+1. **Allow SQL logins.** In SSMS, right-click the server → *Properties* → *Security* → choose
+   *SQL Server and Windows Authentication mode*. Then restart the SQL Server service (SSMS: right-click the
+   server → *Restart*, or the *Services* app). Many installations only allow Windows logins by default, and
+   the server's restricted login is a SQL login.
+2. **Create the database.** Run [`sql/01_create_database.sql`](sql/01_create_database.sql) as an
+   administrator. It creates `ArisMemory`, the `ai` schema and the `ai.CreateTable` procedure.
+3. **Create the AI login.** Open [`sql/02_create_ai_login.sql`](sql/02_create_ai_login.sql), replace
+   `CHANGE_ME_Str0ng!Pass` on the `DECLARE @Password` line with your own password, and run it. The script
+   refuses to run with the placeholder, warns if step 1 is still needed, and can be run again later to reset
+   the password.
+4. **Check the login** with the password you chose:
+   ```powershell
+   sqlcmd -S localhost -U ari_mcp -P "<password>" -d ArisMemory -C -Q "SELECT 1"
+   ```
 
-CI runs both suites: the document tests on Linux and Windows, and the memory tests against SQL Server 2022.
+From a terminal instead of SSMS, the scripts run with `sqlcmd -S localhost -E -C -i sql\01_create_database.sql`
+(and the same for `02`). For SQL Server Express, use `localhost\SQLEXPRESS` everywhere this guide says
+`localhost`.
 
-## Connect it to a host
+Both scripts are safe to run again, for example after pulling a newer version of the repository.
 
-### Claude Desktop
+### 5. Connect Claude Desktop
 
-Open **Settings → Developer → Edit Config** (on Windows the file is
-`%APPDATA%\Claude\claude_desktop_config.json`) and add the servers under `mcpServers`. A complete example is in
-[examples/claude_desktop_config.json](examples/claude_desktop_config.json):
+Open **Settings → Developer → Edit Config**. This opens `%APPDATA%\Claude\claude_desktop_config.json`.
+Add an `mcpServers` entry at the **top level** of the file, next to any keys that are already there (not
+inside another block). Use your own repository path, document folder and password.
+[examples/claude_desktop_config.json](examples/claude_desktop_config.json) has the same content:
 
 ```json
 {
@@ -172,8 +175,33 @@ Open **Settings → Developer → Edit Config** (on Windows the file is
 }
 ```
 
-Restart Claude Desktop, and try *"What does the travel policy in the archive say about trains?"* or
-*"Create a table for my reading list and add the book I'm reading now."*
+Backslashes in JSON are written twice (`\\`). Quit Claude Desktop completely (also from the system tray) and
+start it again. Under **Settings → Developer** both servers should now show as *running*.
+
+### 6. Try it
+
+Start a new chat and ask, for example:
+
+- *"What does the travel policy in the archive say about trains?"*
+- *"Create a table for my reading list with title, author and whether I've finished it."*
+- *"Add the book I'm reading now, then show me the list."*
+
+Claude decides which tools to call from their descriptions, and asks for your permission before it uses them.
+
+## Troubleshooting
+
+| Symptom | Cause and fix |
+| --- | --- |
+| *Couldn't load app settings … Expected double-quoted property name* | The config file is no longer valid JSON, usually because `mcpServers` was pasted inside another block. It must sit at the top level, and every `{` needs its `}`. |
+| A server shows *failed* or *disconnected* | Open **Settings → Developer → Open Logs Folder** and read `mcp-server-ari-*.log`; the server's own errors are printed there. If `uv` is not found, use its full path as `command`, e.g. `C:\Users\<you>\.local\bin\uv.exe` (with `\\` in JSON). |
+| *Login failed for user 'ari_mcp'* | Run `EXEC xp_readerrorlog 0, 1, N'ari_mcp';` as an administrator to see the reason. *Windows authentication only*: do step 4.1. *Password did not match*: run `02_create_ai_login.sql` again with the password from your connection string. |
+| *Cannot connect* or a network error | Check the server name: `localhost\SQLEXPRESS` for Express, and that the SQL Server service is running. |
+| The memory tools answer with a connection error | The server starts even when the database is unreachable and reports why on every call. Fix the cause above and restart Claude Desktop. |
+
+The connection string can also be given with `--connection-string`, and the delete limit changed with
+`--max-deletes` or `ARI_MEMORY_MAX_DELETES` (default 5).
+
+## Other hosts and tools
 
 ### VS Code
 
@@ -190,6 +218,25 @@ npx @modelcontextprotocol/inspector uv run ari-mcp --root sample-docs
 # or headless:
 npx @modelcontextprotocol/inspector --cli uv run ari-mcp --root sample-docs --method tools/list
 ```
+
+## Development
+
+Run a server by hand (it then waits for a client on stdin/stdout):
+
+```powershell
+uv run ari-mcp --root "C:\Store\Dokument"
+uv run ari-memory --connection-string "Server=localhost;Database=ArisMemory;UID=ari_mcp;PWD=…;Encrypt=yes;TrustServerCertificate=yes"
+```
+
+The SQL Server tests run the repository's own setup scripts and then work as `ari_mcp`, so point them at a
+server where they may create `ArisMemory`, for example a throwaway container:
+
+```bash
+docker run -d -p 1433:1433 -e ACCEPT_EULA=Y -e MSSQL_SA_PASSWORD='Str0ng!Passw0rd' mcr.microsoft.com/mssql/server:2022-latest
+ARI_MEMORY_TEST_SERVER=localhost,1433 ARI_MEMORY_TEST_SA_PASSWORD='Str0ng!Passw0rd' uv run pytest
+```
+
+CI runs both suites: the document tests on Linux and Windows, and the memory tests against SQL Server 2022.
 
 ## Project layout
 

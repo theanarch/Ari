@@ -298,3 +298,13 @@ async def test_create_table_procedure_rejects_injection(tasks: Client, admin, na
     finally:
         conn.close()
     assert active_count(admin) == 1
+
+
+def test_login_script_refuses_the_placeholder_password(database):
+    """Someone who runs 02_create_ai_login.sql without editing it gets an error and no login change."""
+    cursor = database.cursor()
+    with pytest.raises(mssql_python.Error, match="Set your own password"):
+        run_script(database, (SQL_DIR / "02_create_ai_login.sql").read_text())
+    cursor.execute("SET NOEXEC OFF")  # The script stops by switching execution off for the rest of the session.
+    conn = mssql_python.connect(ai_connection_string())  # The test password from the fixture still works.
+    conn.close()
