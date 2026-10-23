@@ -1,4 +1,4 @@
-"""The ArisMemory MCP server: lets an AI agent create tables and keep data in SQL Server, within guardrails."""
+"""The ari-memory MCP server: lets an AI agent create tables and keep data in SQL Server, within guardrails."""
 
 from __future__ import annotations
 
@@ -12,10 +12,20 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp_types import ToolAnnotations
 from pydantic import BaseModel, Field
 
-from .memory_store import DEFAULT_MAX_DELETES, MAX_ROWS, NAME_PATTERN, Column, Scalar, StoreError, TableStore
+from .memory_store import (
+    DEFAULT_MAX_DELETES,
+    DEFAULT_SCHEMA,
+    MAX_ROWS,
+    NAME_PATTERN,
+    Column,
+    Scalar,
+    StoreError,
+    TableStore,
+)
 
 CONNECTION_ENV_VAR = "ARI_MEMORY_CONNECTION_STRING"
 MAX_DELETES_ENV_VAR = "ARI_MEMORY_MAX_DELETES"
+SCHEMA_ENV_VAR = "ARI_MEMORY_SCHEMA"
 
 # Hints to the host about what each tool does. Hosts can use destructive_hint to ask the user before running it.
 READ_ONLY = ToolAnnotations(read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=False)
@@ -165,11 +175,19 @@ def main() -> None:
         default=int(os.environ.get(MAX_DELETES_ENV_VAR, DEFAULT_MAX_DELETES)),
         help="Maximum number of deletions per session.",
     )
+    parser.add_argument(
+        "--schema",
+        default=os.environ.get(SCHEMA_ENV_VAR, DEFAULT_SCHEMA),
+        help=f"Schema the AI's tables live in, as chosen in sql/setup.sql (or set {SCHEMA_ENV_VAR}).",
+    )
     args = parser.parse_args()
     if not args.connection_string:
         parser.error(f"Give a connection string with --connection-string or the {CONNECTION_ENV_VAR} variable.")
 
-    store = TableStore(args.connection_string, max_deletes=args.max_deletes)
+    try:
+        store = TableStore(args.connection_string, max_deletes=args.max_deletes, schema=args.schema)
+    except StoreError as exc:
+        parser.error(str(exc))
     try:
         store.check_connection()
     except StoreError as exc:

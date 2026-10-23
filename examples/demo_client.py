@@ -3,7 +3,7 @@
 This is what Claude Desktop, VS Code or any other MCP host does under the hood.
 
     uv run python examples/demo_client.py sample-docs
-    uv run python examples/demo_client.py "C:\\Store\\Dokument" --query budget
+    uv run python examples/demo_client.py "C:\\path\\to\\your\\documents" --query budget
 """
 
 import argparse

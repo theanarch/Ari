@@ -5,10 +5,10 @@
       "args": [
         "run",
         "--directory",
-        "C:\\Users\\Obilic\\source\\repos\\Ari",
+        "C:\\path\\to\\Ari",
         "ari-mcp",
         "--root",
-        "C:\\Store\\Dokument"
+        "C:\\path\\to\\your\\documents"
       ]
     },
     "ari-memory": {
@@ -16,11 +16,11 @@
       "args": [
         "run",
         "--directory",
-        "C:\\Users\\Obilic\\source\\repos\\Ari",
+        "C:\\path\\to\\Ari",
         "ari-memory"
       ],
       "env": {
-        "ARI_MEMORY_CONNECTION_STRING": "Server=localhost;Database=ArisMemory;UID=ari_mcp;PWD=CHANGE_ME_Str0ng!Pass;Encrypt=yes;TrustServerCertificate=yes"
+        "ARI_MEMORY_CONNECTION_STRING": "Server=localhost;Database=<database>;UID=<login>;PWD=<password>;Encrypt=yes;TrustServerCertificate=yes"
       }
     }
   }

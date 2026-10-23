@@ -1,7 +1,7 @@
-"""Integration tests for the ArisMemory server against a real SQL Server.
+"""Integration tests for the ari-memory server against a real SQL Server.
 
-They run the repository's own SQL scripts, then connect as the restricted ari_mcp login, exactly as the
-server does in production. Skipped unless ARI_MEMORY_TEST_SERVER and ARI_MEMORY_TEST_SA_PASSWORD are set, e.g.:
+They run the repository's own sql/setup.sql with test values (and a non-default schema), then connect as the
+restricted login it creates, exactly as the server does in production. Skipped unless ARI_MEMORY_TEST_SERVER and ARI_MEMORY_TEST_SA_PASSWORD are set, e.g.:
 
     docker run -d -p 1433:1433 -e ACCEPT_EULA=Y -e MSSQL_SA_PASSWORD='Str0ng!Passw0rd' \\
         mcr.microsoft.com/mssql/server:2022-latest
@@ -31,8 +31,12 @@ if SERVER and SA_PASSWORD:
     from ari_mcp.memory_server import create_memory_server
     from ari_mcp.memory_store import TableStore
 
-SQL_DIR = Path(__file__).resolve().parent.parent / "sql"
+SETUP_SQL = Path(__file__).resolve().parent.parent / "sql" / "setup.sql"
+DATABASE = "AriTest"
+LOGIN = "ari_test_agent"
 AI_PASSWORD = "Test_M3mory!Pass"
+SCHEMA = "agent"
+SETUP_VALUES = {"DatabaseName": DATABASE, "LoginName": LOGIN, "LoginPassword": AI_PASSWORD, "SchemaName": SCHEMA}
 TLS = "Encrypt=yes;TrustServerCertificate=yes"
 
 TASKS = [
@@ -55,6 +59,14 @@ def admin_connection():
             time.sleep(2)
 
 
+def render_sqlcmd(script: str, values: dict[str, str]) -> str:
+    """Do what sqlcmd does with :setvar lines and $(Name) references, with our values taking precedence."""
+    variables = dict(re.findall(r'^:setvar\s+(\w+)\s+"([^"]*)"\s*$', script, flags=re.MULTILINE))
+    variables.update(values)
+    script = re.sub(r"^:setvar.*$", "", script, flags=re.MULTILINE)
+    return re.sub(r"\$\((\w+)\)", lambda m: variables[m.group(1)], script)
+
+
 def run_script(conn, script: str) -> None:
     """Run a .sql file the way SSMS does: one batch per GO separator."""
     cursor = conn.cursor()
@@ -65,34 +77,33 @@ def run_script(conn, script: str) -> None:
 
 
 def ai_connection_string() -> str:
-    return f"Server={SERVER};Database=ArisMemory;UID=ari_mcp;PWD={AI_PASSWORD};{TLS}"
+    return f"Server={SERVER};Database={DATABASE};UID={LOGIN};PWD={AI_PASSWORD};{TLS}"
 
 
 @pytest.fixture(scope="module")
 def database():
     conn = admin_connection()
-    run_script(conn, (SQL_DIR / "01_create_database.sql").read_text())
-    login_script = (SQL_DIR / "02_create_ai_login.sql").read_text().replace("CHANGE_ME_Str0ng!Pass", AI_PASSWORD)
-    run_script(conn, login_script)
+    conn.cursor().execute("SET QUOTED_IDENTIFIER OFF")  # sqlcmd's default; the script must cope with it.
+    run_script(conn, render_sqlcmd(SETUP_SQL.read_text(), SETUP_VALUES))
     yield conn
     conn.close()
 
 
 @pytest.fixture
 def admin(database):
-    """Admin cursor on an empty "ai" schema, for inspecting data behind the AI's back."""
+    """Admin cursor on an empty schema, for inspecting data behind the AI's back."""
     cursor = database.cursor()
-    cursor.execute("USE ArisMemory")
-    cursor.execute("SELECT name FROM sys.tables WHERE schema_id = SCHEMA_ID('ai')")
+    cursor.execute(f"USE {DATABASE}")
+    cursor.execute("SELECT name FROM sys.tables WHERE schema_id = SCHEMA_ID(?)", (SCHEMA,))
     for (name,) in cursor.fetchall():
-        cursor.execute(f"DROP TABLE ai.[{name}]")
+        cursor.execute(f"DROP TABLE {SCHEMA}.[{name}]")
     yield cursor
     cursor.close()
 
 
 @pytest.fixture
 async def client(admin):
-    store = TableStore(ai_connection_string(), max_deletes=2)
+    store = TableStore(ai_connection_string(), max_deletes=2, schema=SCHEMA)
     async with Client(create_memory_server(store)) as c:
         yield c
 
@@ -112,7 +123,7 @@ async def insert(client, **values):
 
 
 def active_count(admin, table="Tasks") -> int:
-    admin.execute(f"SELECT COUNT(*) FROM ai.[{table}] WHERE DeletedAt IS NULL")
+    admin.execute(f"SELECT COUNT(*) FROM {SCHEMA}.[{table}] WHERE DeletedAt IS NULL")
     return admin.fetchall()[0][0]
 
 
@@ -176,7 +187,7 @@ async def test_update_changes_one_row(tasks: Client, admin):
     row = result.structured_content["row"]
     assert (row["Title"], row["Done"]) == ("new", True)
     assert row["UpdatedAt"] is not None
-    admin.execute("SELECT Title FROM ai.Tasks ORDER BY Id")
+    admin.execute("SELECT Title FROM agent.Tasks ORDER BY Id")
     assert [r[0] for r in admin.fetchall()] == ["new", "keep"]
 
 
@@ -191,7 +202,7 @@ async def test_update_changes_one_row(tasks: Client, admin):
         ("insert_row", {"table": "Tasks", "values": {"Id": 5, "Title": "x"}}, "managed automatically"),
         ("insert_row", {"table": "Tasks", "values": {"DeletedAt": None, "Title": "x"}}, "managed automatically"),
         ("update_row", {"table": "Tasks", "row_id": 99, "values": {"Title": "x"}}, "No active row"),
-        ("query_rows", {"table": "Tasks", "where": {"Title]; DROP TABLE ai.Tasks; --": "x"}}, "has no column"),
+        ("query_rows", {"table": "Tasks", "where": {"Title]; DROP TABLE agent.Tasks; --": "x"}}, "has no column"),
     ],
 )
 async def test_unknown_names_and_ids_are_refused(tasks: Client, admin, tool: str, args: dict, message: str):
@@ -209,7 +220,7 @@ async def test_delete_is_soft_and_recoverable(tasks: Client, admin):
 
     rows = (await tasks.call_tool("query_rows", {"table": "Tasks"})).structured_content["rows"]
     assert [r["Title"] for r in rows] == ["keep"]
-    admin.execute("SELECT COUNT(*), COUNT(DeletedAt) FROM ai.Tasks")
+    admin.execute("SELECT COUNT(*), COUNT(DeletedAt) FROM agent.Tasks")
     assert tuple(admin.fetchall()[0]) == (2, 1)
     # A deleted row can't be deleted or edited again.
     assert (await tasks.call_tool("delete_row", {"table": "Tasks", "row_id": 1})).is_error
@@ -245,9 +256,9 @@ async def test_create_table_validates_the_design(tasks: Client, args: dict, mess
 
 
 async def test_sql_in_values_is_stored_as_text(tasks: Client, admin):
-    evil = "'); DROP TABLE ai.Tasks; --"
+    evil = "'); DROP TABLE agent.Tasks; --"
     await insert(tasks, Title=evil)
-    admin.execute("SELECT Title FROM ai.Tasks")
+    admin.execute("SELECT Title FROM agent.Tasks")
     assert admin.fetchall()[0][0] == evil
 
 
@@ -257,19 +268,19 @@ async def test_sql_in_values_is_stored_as_text(tasks: Client, admin):
 @pytest.mark.parametrize(
     "statement",
     [
-        "DELETE FROM ai.Tasks",
-        "TRUNCATE TABLE ai.Tasks",
-        "DROP TABLE ai.Tasks",
-        "ALTER TABLE ai.Tasks ADD Extra INT",
-        "CREATE TABLE ai.Sneaky (Id INT)",
+        "DELETE FROM agent.Tasks",
+        "TRUNCATE TABLE agent.Tasks",
+        "DROP TABLE agent.Tasks",
+        "ALTER TABLE agent.Tasks ADD Extra INT",
+        "CREATE TABLE agent.Sneaky (Id INT)",
         "CREATE TABLE dbo.Sneaky (Id INT)",
-        "DROP PROCEDURE ai.CreateTable",
-        "ALTER SCHEMA dbo TRANSFER ai.Tasks",
-        "DROP DATABASE ArisMemory",
+        "DROP PROCEDURE agent.CreateTable",
+        "ALTER SCHEMA dbo TRANSFER agent.Tasks",
+        "DROP DATABASE AriTest",
     ],
 )
 async def test_ai_login_cannot_destroy_anything(tasks: Client, admin, statement: str):
-    """Even with raw SQL, bypassing the server code entirely, the ari_mcp login is refused."""
+    """Even with raw SQL, bypassing the server code entirely, the AI login is refused."""
     await insert(tasks, Title="survives")
     conn = mssql_python.connect(ai_connection_string(), autocommit=True)
     try:
@@ -283,28 +294,55 @@ async def test_ai_login_cannot_destroy_anything(tasks: Client, admin, statement:
 @pytest.mark.parametrize(
     ("name", "columns"),
     [
-        ("x]; DROP TABLE ai.Tasks; --", [{"name": "A", "type": "text"}]),
-        ("Ok", [{"name": "A] INT); DROP TABLE ai.Tasks; --", "type": "text"}]),
-        ("Ok", [{"name": "A", "type": "text); DROP TABLE ai.Tasks; --"}]),
+        ("x]; DROP TABLE agent.Tasks; --", [{"name": "A", "type": "text"}]),
+        ("Ok", [{"name": "A] INT); DROP TABLE agent.Tasks; --", "type": "text"}]),
+        ("Ok", [{"name": "A", "type": "text); DROP TABLE agent.Tasks; --"}]),
     ],
 )
 async def test_create_table_procedure_rejects_injection(tasks: Client, admin, name: str, columns: list):
-    """Calling ai.CreateTable directly as ari_mcp, without the Python checks, still can't inject SQL."""
+    """Calling CreateTable directly as the AI login, without the Python checks, still can't inject SQL."""
     await insert(tasks, Title="survives")
     conn = mssql_python.connect(ai_connection_string(), autocommit=True)
     try:
         with pytest.raises(mssql_python.Error):
-            conn.cursor().execute("EXEC ai.CreateTable ?, ?", (name, json.dumps(columns)))
+            conn.cursor().execute("EXEC agent.CreateTable ?, ?", (name, json.dumps(columns)))
     finally:
         conn.close()
     assert active_count(admin) == 1
 
 
-def test_login_script_refuses_the_placeholder_password(database):
-    """Someone who runs 02_create_ai_login.sql without editing it gets an error and no login change."""
+@pytest.mark.parametrize(
+    ("values", "message"),
+    [
+        ({}, "Choose your own"),
+        ({"LoginPassword": "Real_Pass!123"}, "Choose your own"),
+        ({"DatabaseName": "Bad Name; DROP", "LoginName": "x", "LoginPassword": "Real_Pass!123"}, "may only contain"),
+    ],
+)
+def test_setup_script_refuses_placeholders_and_bad_names(database, values: dict, message: str):
+    """Someone who runs setup.sql without choosing values gets an error, and nothing is changed."""
     cursor = database.cursor()
-    with pytest.raises(mssql_python.Error, match="Set your own password"):
-        run_script(database, (SQL_DIR / "02_create_ai_login.sql").read_text())
+    with pytest.raises(mssql_python.Error, match=message):
+        run_script(database, render_sqlcmd(SETUP_SQL.read_text(), values))
     cursor.execute("SET NOEXEC OFF")  # The script stops by switching execution off for the rest of the session.
-    conn = mssql_python.connect(ai_connection_string())  # The test password from the fixture still works.
+    cursor.execute("SELECT DB_ID(N'CHANGE_ME_database'), DB_ID(N'Bad Name; DROP')")
+    assert tuple(cursor.fetchall()[0]) == (None, None)
+    conn = mssql_python.connect(ai_connection_string())  # The test login and password are untouched.
     conn.close()
+
+
+def test_setup_script_without_sqlcmd_mode_changes_nothing(database):
+    """In SSMS without SQLCMD mode, :setvar is a syntax error and $(Name) stays literal text. Every batch still
+    runs (SSMS carries on after an error), so the guard has to stop the rest of the script on its own."""
+    cursor = database.cursor()
+    errors = []
+    for batch in re.split(r"^\s*GO\s*$", SETUP_SQL.read_text(), flags=re.MULTILINE | re.IGNORECASE):
+        if batch.strip():
+            try:
+                cursor.execute(batch)
+            except mssql_python.Error as exc:
+                errors.append(str(exc))
+    cursor.execute("SET NOEXEC OFF")
+    assert any("Turn on SQLCMD mode" in e for e in errors)
+    cursor.execute("SELECT DB_ID(N'$(DatabaseName)'), SUSER_ID(N'$(LoginName)')")
+    assert tuple(cursor.fetchall()[0]) == (None, None)

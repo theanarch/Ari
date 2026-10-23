@@ -22,7 +22,7 @@ jobs:
       - run: uv run pytest -v
 
   memory-sql-server:
-    # Runs the ArisMemory tests, including the guardrail tests, against a real SQL Server 2022.
+    # Runs the ari-memory tests, including sql/setup.sql and the guardrail tests, against a real SQL Server 2022.
     runs-on: ubuntu-latest
     services:
       mssql:

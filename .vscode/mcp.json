@@ -3,8 +3,8 @@
     {
       "type": "promptString",
       "id": "docs-root",
-      "description": "Folder with public documents for the Ari MCP server",
-      "default": "C:\\Store\\Dokument"
+      "description": "Folder with documents for ari-documents (absolute, or relative to the repository)",
+      "default": "sample-docs"
     }
   ],
   "servers": {

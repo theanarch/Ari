@@ -1,9 +1,9 @@
-"""Database access for the ArisMemory server, with the guardrails built in.
+"""Database access for the ari-memory server, with the guardrails built in.
 
 The AI never writes SQL. It names a table, columns and values; this module checks every name against the
-database's own catalog, quotes it, and passes every value as a parameter. Tables live in the "ai" schema and are
-created only through the ai.CreateTable procedure. Each write touches exactly one row, deletes are soft
-(the row gets a DeletedAt timestamp) and capped per session.
+database's own catalog, quotes it, and passes every value as a parameter. Tables live in one schema ("ai" by
+default) and are created only through that schema's CreateTable procedure (see sql/setup.sql). Each write
+touches exactly one row, deletes are soft (the row gets a DeletedAt timestamp) and capped per session.
 """
 
 from __future__ import annotations
@@ -20,12 +20,12 @@ import mssql_python
 DEFAULT_MAX_DELETES = 5
 MAX_ROWS = 100
 
-SCHEMA = "ai"
+DEFAULT_SCHEMA = "ai"
 SYSTEM_COLUMNS = ("Id", "CreatedAt", "UpdatedAt", "DeletedAt")
 NAME_PATTERN = r"^[A-Za-z][A-Za-z0-9_]{0,63}$"
 _NAME_RE = re.compile(NAME_PATTERN)
 
-# Column types the AI may ask for. ai.CreateTable maps the same names to SQL types.
+# Column types the AI may ask for. The CreateTable procedure maps the same names to SQL types.
 COLUMN_TYPES = ("text", "long_text", "integer", "decimal", "boolean", "date", "datetime")
 
 Scalar = str | int | float | bool | None
@@ -49,10 +49,17 @@ class Table:
 
 
 class TableStore:
-    def __init__(self, connection_string: str, max_deletes: int = DEFAULT_MAX_DELETES) -> None:
+    def __init__(
+        self,
+        connection_string: str,
+        max_deletes: int = DEFAULT_MAX_DELETES,
+        schema: str = DEFAULT_SCHEMA,
+    ) -> None:
+        _check_name(schema, "schema")
         self._connection_string = connection_string
         self._max_deletes = max_deletes
         self._deletes_done = 0
+        self._schema = schema
 
     def _connect(self) -> mssql_python.Connection:
         # A fresh connection per call keeps things simple and survives SQL Server restarts.
@@ -62,9 +69,16 @@ class TableStore:
             raise StoreError(f"Cannot connect to SQL Server: {exc}") from exc
 
     def check_connection(self) -> None:
+        """Fail with a clear message if the login, schema or CreateTable procedure is missing."""
         conn = self._connect()
         try:
-            conn.cursor().execute("SELECT TOP (0) 1 FROM sys.schemas WHERE name = ?", (SCHEMA,))
+            cursor = conn.cursor()
+            cursor.execute("SELECT OBJECT_ID(?, 'P')", (f"{_quote(self._schema)}.CreateTable",))
+            if cursor.fetchall()[0][0] is None:
+                raise StoreError(
+                    f"Connected, but found no {self._schema}.CreateTable procedure this login may use. "
+                    "Run sql/setup.sql, and check that the schema name matches."
+                )
         finally:
             conn.close()
 
@@ -81,7 +95,7 @@ class TableStore:
                 "JOIN sys.types ty ON ty.user_type_id = c.user_type_id "
                 "WHERE t.schema_id = SCHEMA_ID(?) "
                 "ORDER BY t.name, c.column_id",
-                (SCHEMA,),
+                (self._schema,),
             )
             tables: dict[str, Table] = {}
             for table, column, sql_type, max_length, nullable in cursor.fetchall():
@@ -99,7 +113,7 @@ class TableStore:
         spec = json.dumps([{"name": c.name, "type": c.type, "required": c.required} for c in columns])
         conn = self._connect()
         try:
-            conn.cursor().execute("EXEC ai.CreateTable @TableName = ?, @Columns = ?", (name, spec))
+            conn.cursor().execute(f"EXEC {_quote(self._schema)}.CreateTable @TableName = ?, @Columns = ?", (name, spec))
             conn.commit()
         except mssql_python.Error as exc:
             conn.rollback()
@@ -140,7 +154,7 @@ class TableStore:
             filters.append("(" + " OR ".join(f"{_quote(c)} LIKE ? ESCAPE '\\'" for c in text_columns) + ")")
             params.extend([pattern] * len(text_columns))
 
-        sql = f"SELECT TOP (?) * FROM {_table_ref(info.name)} WHERE {' AND '.join(filters)} ORDER BY Id DESC"
+        sql = f"SELECT TOP (?) * FROM {self._ref(info.name)} WHERE {' AND '.join(filters)} ORDER BY Id DESC"
         conn = self._connect()
         try:
             cursor = conn.cursor()
@@ -157,7 +171,7 @@ class TableStore:
         if not names:
             raise StoreError("Give at least one column value.")
         sql = (
-            f"INSERT INTO {_table_ref(info.name)} ({', '.join(_quote(n) for n in names)}) "
+            f"INSERT INTO {self._ref(info.name)} ({', '.join(_quote(n) for n in names)}) "
             f"OUTPUT INSERTED.* VALUES ({', '.join('?' for _ in names)})"
         )
         return self._change_one_row(sql, tuple(values.values()))
@@ -169,7 +183,7 @@ class TableStore:
             raise StoreError("Give at least one column value to change.")
         assignments = ", ".join(f"{_quote(n)} = ?" for n in names)
         sql = (
-            f"UPDATE {_table_ref(info.name)} SET {assignments}, UpdatedAt = SYSUTCDATETIME() "
+            f"UPDATE {self._ref(info.name)} SET {assignments}, UpdatedAt = SYSUTCDATETIME() "
             "OUTPUT INSERTED.* WHERE Id = ? AND DeletedAt IS NULL"
         )
         return self._change_one_row(sql, (*values.values(), row_id))
@@ -182,12 +196,15 @@ class TableStore:
                 "Ask the user to remove further rows themselves."
             )
         row = self._change_one_row(
-            f"UPDATE {_table_ref(info.name)} SET DeletedAt = SYSUTCDATETIME() OUTPUT INSERTED.* "
+            f"UPDATE {self._ref(info.name)} SET DeletedAt = SYSUTCDATETIME() OUTPUT INSERTED.* "
             "WHERE Id = ? AND DeletedAt IS NULL",
             (row_id,),
         )
         self._deletes_done += 1
         return row
+
+    def _ref(self, table: str) -> str:
+        return f"{_quote(self._schema)}.{_quote(table)}"
 
     def _change_one_row(self, sql: str, params: tuple) -> dict[str, Any]:
         """Run one write in a transaction and commit only if exactly one row changed.
@@ -238,10 +255,6 @@ def _quote(name: str) -> str:
     return "[" + name.replace("]", "]]") + "]"
 
 
-def _table_ref(name: str) -> str:
-    return f"{_quote(SCHEMA)}.{_quote(name)}"
-
-
 def _friendly_type(sql_type: str, max_length: int) -> str:
     if sql_type == "nvarchar":
         return "long_text" if max_length > 800 else "text"
@@ -272,7 +285,7 @@ def _escape_like(text: str) -> str:
 
 
 def _sql_message(exc: mssql_python.Error) -> str:
-    """Keep the part of a driver error the model can act on, e.g. a THROW message from ai.CreateTable."""
+    """Keep the part of a driver error the model can act on, e.g. a THROW message from CreateTable."""
     text = str(exc)
     marker = "[SQL Server]"
     return text.split(marker, 1)[1].strip() if marker in text else text
